@@ -1,5 +1,3 @@
-# 📦 INSTALL FIRST (uncomment if not installed in Kaggle already)
-# !pip install arch
 
 import os
 import numpy as np
