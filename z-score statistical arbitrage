@@ -1,0 +1,76 @@
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from statsmodels.api import OLS, add_constant
+from statsmodels.tsa.stattools import adfuller
+
+# CONFIG
+BASE_PATH = '/kaggle/input/marketdata-ohlcv/market_data'
+category_folders = ['mag7', 'sectors', 'crypto', 'forex', 'commodities', 'indices', 'macro']
+
+# LOAD SPY
+spy_df = pd.read_csv(f'{BASE_PATH}/target/SPY_1d.csv', skiprows=2)
+spy_df.columns = ['Date', 'Close', 'High', 'Low', 'Open', 'Volume']
+spy_df = spy_df[spy_df['Date'] >= '2022-07-01']
+spy_df['Close'] = pd.to_numeric(spy_df['Close'], errors='coerce')
+spy_df = spy_df.dropna(subset=['Close'])
+spy_close_full = spy_df['Close'].values.reshape(-1, 1)
+
+# SCAN ALL ASSETS, COMPUTE ADF, SELECT TOP 5
+adf_results = []
+
+for folder in category_folders:
+    folder_path = os.path.join(BASE_PATH, folder)
+    if not os.path.exists(folder_path):
+        continue
+    
+    for file in os.listdir(folder_path):
+        if not file.endswith('.csv'):
+            continue
+
+        asset_path = os.path.join(folder_path, file)
+        df = pd.read_csv(asset_path, skiprows=2)
+        df.columns = ['Date', 'Close', 'High', 'Low', 'Open', 'Volume']
+        df = df[df['Date'] >= '2022-07-01']
+        df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
+        df = df.dropna(subset=['Close'])
+
+        log_asset = np.log(df['Close'].values)
+        log_spy = np.log(spy_close_full.flatten())
+        min_len = min(len(log_asset), len(log_spy))
+        log_asset = log_asset[-min_len:]
+        log_spy = log_spy[-min_len:]
+
+        try:
+            X = add_constant(log_asset)
+            model = OLS(log_spy, X).fit()
+            residuals = model.resid
+            adf_result = adfuller(residuals)
+            p_value = adf_result[1]
+            test_stat = adf_result[0]
+            
+            adf_results.append((file, p_value, test_stat, df['Date'].values[-min_len:], residuals))
+        except Exception as e:
+            continue
+
+# SELECT TOP 5 COINTEGRATED PAIRS
+adf_results = sorted([r for r in adf_results if r[1] < 0.05], key=lambda x: x[2])[:5]
+
+# PLOT Z-SCORE FOR TOP 5
+for file, p_value, test_stat, dates, residuals in adf_results:
+    zscore = pd.Series(residuals)
+    zscore = (zscore - zscore.rolling(window=90).mean()) / zscore.rolling(window=90).std()
+    zscore = zscore.fillna(0)
+    z_dates = pd.to_datetime(dates)
+
+    plt.figure(figsize=(14, 4))
+    plt.plot(z_dates, zscore, label=f'Z-score ({file})')
+    plt.axhline(2, color='red', linestyle='--', label='Short Entry')
+    plt.axhline(-2, color='green', linestyle='--', label='Long Entry')
+    plt.axhline(0, color='black', linestyle=':')
+    plt.title(f'Top StatArb Z-score (ADF p={p_value:.5f}) — {file}')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
