@@ -1,0 +1,87 @@
+# 📦 INSTALL FIRST (uncomment if not installed in Kaggle already)
+# !pip install arch
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from arch import arch_model
+
+# CONFIG
+BASE_PATH = '/kaggle/input/marketdata-ohlcv/market_data'
+category_folders = ['mag7', 'sectors', 'crypto', 'forex', 'commodities', 'indices', 'macro']
+TARGET_PATH = f'{BASE_PATH}/target/SPY_1d.csv'
+
+# LOAD SPY
+spy_df = pd.read_csv(TARGET_PATH, skiprows=2)
+spy_df.columns = ['Date', 'Close', 'High', 'Low', 'Open', 'Volume']
+spy_df['Date'] = pd.to_datetime(spy_df['Date'])
+spy_df = spy_df[spy_df['Date'] >= '2022-01-01']
+spy_df['Close'] = pd.to_numeric(spy_df['Close'], errors='coerce')
+spy_df = spy_df.dropna(subset=['Close'])
+spy_df['Return'] = 100 * spy_df['Close'].pct_change()
+spy_returns = spy_df[['Date', 'Return']].dropna().set_index('Date')
+
+# GARCH(1,1) on SPY
+spy_garch = arch_model(spy_returns['Return'], vol='GARCH', p=1, q=1)
+spy_fit = spy_garch.fit(disp='off')
+spy_vol = pd.Series(np.sqrt(spy_fit.conditional_volatility), index=spy_returns.index)
+
+# 🔍 CORRELATE OTHER ASSETS TO SPY VOL
+correlations = []
+asset_data = {}
+
+for folder in category_folders:
+    folder_path = os.path.join(BASE_PATH, folder)
+    if not os.path.exists(folder_path):
+        continue
+
+    for file in os.listdir(folder_path):
+        if not file.endswith('.csv'):
+            continue
+        path = os.path.join(folder_path, file)
+        try:
+            df = pd.read_csv(path, skiprows=2)
+            df.columns = ['Date', 'Close', 'High', 'Low', 'Open', 'Volume']
+            df['Date'] = pd.to_datetime(df['Date'])
+            df = df[df['Date'] >= '2022-01-01']
+            df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
+            df = df.dropna(subset=['Close'])
+            df['Return'] = 100 * df['Close'].pct_change()
+            df = df[['Date', 'Return']].dropna().set_index('Date')
+            aligned = df.join(spy_vol, how='inner').dropna()
+            corr = aligned.corr().iloc[0, 1]
+            correlations.append((file, corr))
+            asset_data[file] = aligned
+        except Exception:
+            continue
+
+# 📊 SELECT TOP 5 CORRELATED ASSETS
+top5 = sorted(correlations, key=lambda x: abs(x[1]), reverse=True)[:5]
+print("Top 5 assets most correlated to SPY GARCH volatility:")
+for name, corr in top5:
+    print(f"{name}: Corr = {corr:.4f}")
+
+# 🧠 GARCH-X with top 5 assets as exogenous inputs
+X = pd.concat([asset_data[name][['Return']] for name, _ in top5], axis=1)
+X.columns = [f'Return_{i+1}' for i in range(len(X.columns))]
+X = X.loc[spy_returns.index.intersection(X.index)]
+
+aligned_returns = spy_returns.loc[X.index]
+garch_x = arch_model(aligned_returns['Return'], vol='GARCH', p=1, q=1, x=X)
+garch_x_fit = garch_x.fit(disp='off')
+
+# 🧾 Print results
+print("\n=== GARCH-X(1,1) Summary ===")
+print(garch_x_fit.summary())
+
+# 📈 Plot SPY Volatility Forecast
+plt.figure(figsize=(12, 4))
+plt.plot(spy_vol.index[-252:], spy_vol[-252:], label="SPY Volatility")
+plt.title("SPY Volatility from GARCH(1,1)")
+plt.xlabel("Date")
+plt.ylabel("Volatility (%)")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.show()
